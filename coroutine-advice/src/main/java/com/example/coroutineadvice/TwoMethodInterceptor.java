@@ -15,6 +15,7 @@ import org.aopalliance.intercept.MethodInterceptor;
 import org.aopalliance.intercept.MethodInvocation;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -23,12 +24,21 @@ import org.springframework.core.KotlinDetector;
 import org.springframework.core.MethodParameter;
 import org.springframework.core.ReactiveAdapter;
 import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.SpringVersion;
 import org.springframework.core.convert.converter.Converter;
+import org.springframework.util.ClassUtils;
 
 public class TwoMethodInterceptor implements MethodInterceptor {
     private static final String COROUTINES_FLOW_CLASS_NAME = "kotlinx.coroutines.flow.Flow";
 
     private static final int RETURN_TYPE_METHOD_PARAMETER_INDEX = -1;
+
+    private static final boolean isCoroutineUtilsPresent;
+
+    static {
+        isCoroutineUtilsPresent = ClassUtils.isPresent("org.springframework.aop.framework.CoroutinesUtils",
+            OneMethodInterceptor.class.getClassLoader());
+    }
 
     private final Converter<Object, Mono<Object>> advice = (result) -> {
         if (result.toString().endsWith("o")) {
@@ -59,11 +69,19 @@ public class TwoMethodInterceptor implements MethodInterceptor {
             return ReactiveFlowKt.asFlow(flux.flatMap((r) -> this.advice.convert(r)).thenMany(flux));
         }
         if (isSuspendingFunction) {
+            if (isCoroutineUtilsPresent) {
+                Object result = invocation.proceed();
+                if (Flux.class.isAssignableFrom(result.getClass())) {
+                    Flux<?> flux = (Flux<?>) result;
+                    return flux.flatMap((r) -> this.advice.convert(r)).thenMany(flux);
+                }
+                return ((Mono<?>) result).flatMap((r) -> this.advice.convert(r).then(Mono.just(r)));
+            }
             Mono<?> response = Mono.from(CoroutinesUtils.invokeSuspendingFunction(invocation.getMethod(), invocation.getThis(),
-                            invocation.getArguments()))
-                    .flatMap((r) -> this.advice.convert(r).then(Mono.just(r)));
+                    invocation.getArguments()))
+                .flatMap((r) -> this.advice.convert(r).then(Mono.just(r)));
             return MonoKt.awaitSingleOrNull(response,
-                    (Continuation<Object>) invocation.getArguments()[invocation.getArguments().length - 1]);
+                (Continuation<Object>) invocation.getArguments()[invocation.getArguments().length - 1]);
         }
         return invocation.proceed();
     }
